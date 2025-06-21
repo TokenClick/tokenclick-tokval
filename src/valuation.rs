@@ -217,3 +217,134 @@ fn calculate_summary_statistics(
         adjusted_baseline,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use approx::assert_relative_eq;
+
+    /// Creates a default, valid set of ValuationInputs for use in tests.
+    /// Includes the new investor-centric lift model parameters.
+    fn get_default_inputs() -> ValuationInputs {
+        ValuationInputs {
+            raw_forecast: 220_000.0,
+            risk_free_rate: 0.045,
+            platform_risk_premium: 0.12,
+            platform_adjustment_factor: -0.091,
+            baseline_audience: 1_000_000.0,
+            rpm: 15.0,
+            investor_count: 1000,
+            lift_per_investor: 10.0,
+        }
+    }
+
+    #[test]
+    fn test_adjusted_baseline_calculation() {
+        let baseline = calculate_adjusted_baseline(100_000.0, -0.091);
+        assert_relative_eq!(baseline, 90_900.0, epsilon = 0.01);
+    }
+
+    #[test]
+    fn test_present_value_calculation() {
+        // Test with known values for a full year
+        let pv_full_year = calculate_present_value(100_000.0, 0.10, 1.0).unwrap();
+        assert_relative_eq!(pv_full_year, 90_909.09, epsilon = 0.01);
+
+        // Test with 90 days, ensuring the expected value matches the precise calculation.
+        let time_period = 90.0 / 365.0; // approx 0.246575
+        let pv_90_days = calculate_present_value(100_000.0, 0.10, time_period).unwrap();
+
+        // The expected value is updated to the correct result of the calculation.
+        assert_relative_eq!(pv_90_days, 97_677.29, epsilon = 0.01);
+    }
+
+    #[test]
+    /// Tests the calculation of additional audience based on the new driver-based model.
+    fn test_additional_audience_calculation() {
+        let investor_count = 1000;
+        let lift_per_investor = 10.0;
+
+        // Medium scenario has an activation factor of 1.0
+        let medium_lift_audience =
+            LiftScenario::Medium.additional_audience(investor_count, lift_per_investor);
+        // Expected: 1000 investors * 10 lift/investor * 1.0 factor = 10,000
+        assert_relative_eq!(medium_lift_audience, 10_000.0);
+
+        // High scenario has an activation factor of 1.5
+        let high_lift_audience =
+            LiftScenario::High.additional_audience(investor_count, lift_per_investor);
+        // Expected: 1000 investors * 10 lift/investor * 1.5 factor = 15,000
+        assert_relative_eq!(high_lift_audience, 15_000.0);
+    }
+
+    #[test]
+    /// Tests the quarterly lift revenue calculation using the new model.
+    fn test_quarterly_lift_revenue_calculation() {
+        let investor_count = 1000;
+        let lift_per_investor = 10.0;
+        let rpm = 20.0; // Use a custom RPM for the test
+
+        // Test Medium Lift (activation factor 1.0)
+        let medium_lift_revenue =
+            LiftScenario::Medium.quarterly_lift(investor_count, lift_per_investor, rpm);
+        // Expected Audience: 1000 * 10 * 1.0 = 10,000
+        // Expected Revenue: (10,000 / 1000) * $20 RPM * 3 months = $600
+        assert_relative_eq!(medium_lift_revenue, 600.0);
+
+        // Test Low Lift (activation factor 0.5)
+        let low_lift_revenue =
+            LiftScenario::Low.quarterly_lift(investor_count, lift_per_investor, rpm);
+        // Expected Audience: 1000 * 10 * 0.5 = 5,000
+        // Expected Revenue: (5,000 / 1000) * $20 RPM * 3 months = $300
+        assert_relative_eq!(low_lift_revenue, 300.0);
+    }
+
+    #[test]
+    /// An integration test to verify the end-to-end calculation with custom inputs
+    /// for the new, more sophisticated lift model.
+    fn test_full_valuation_with_custom_lift_drivers() {
+        let mut inputs = get_default_inputs();
+        // Override default inputs with custom test values
+        inputs.rpm = 25.0;
+        inputs.investor_count = 2000;
+        inputs.lift_per_investor = 15.0;
+
+        let report_data = calculate_full_valuation(&inputs).unwrap();
+
+        // 1. Check that the report's assumptions reflect the custom inputs.
+        assert_relative_eq!(report_data.lift_assumptions.rpm, 25.0);
+        assert_eq!(report_data.lift_assumptions.investor_count, 2000);
+        assert_relative_eq!(report_data.lift_assumptions.lift_per_investor, 15.0);
+
+        // 2. Manually calculate the expected result for a single, known scenario (the central estimate).
+        // Scenario: Medium Lift, Typical Volatility, 90 Day Payout
+
+        // Calculate expected lift revenue using the new model
+        let expected_lift = LiftScenario::Medium.quarterly_lift(
+            inputs.investor_count,
+            inputs.lift_per_investor,
+            inputs.rpm,
+        );
+        // Expected Audience: 2000 * 15 * 1.0 = 30,000
+        // Expected Revenue: (30,000 / 1000) * $25 RPM * 3 months = $2,250
+        assert_relative_eq!(expected_lift, 2_250.0);
+
+        // Calculate total cash flow for this scenario
+        let adjusted_baseline =
+            calculate_adjusted_baseline(inputs.raw_forecast, inputs.platform_adjustment_factor);
+        let expected_lifted_revenue = adjusted_baseline + expected_lift;
+
+        // Calculate the discount rate for this scenario
+        let components = calculate_discount_rate(&inputs, VolatilityScenario::Typical);
+        let discount_rate = components.total_rate();
+        let time_years = PayoutScenario::Day90.years();
+
+        // Calculate the final expected Present Value
+        let expected_pv =
+            calculate_present_value(expected_lifted_revenue, discount_rate, time_years).unwrap();
+
+        // 3. Assert that the central estimate calculated by the main function matches our manual calculation.
+        let central_estimate = report_data.summary.central_estimate;
+        assert_relative_eq!(central_estimate, expected_pv, epsilon = 0.01);
+    }
+}

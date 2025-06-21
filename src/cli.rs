@@ -1,4 +1,5 @@
 //! Command-line interface definitions for tokval.
+
 use clap::Parser;
 
 /// Token Valuator - Calculate fair present value of tokenized quarterly ad revenue
@@ -20,4 +21,22 @@ pub struct Args {
     /// Platform adjustment factor (as percentage, negative for reduction)
     #[arg(short = 'a', long, default_value = "-9.1")]
     pub platform_adjustment: f64,
+
+    /// Baseline monthly audience for lift model calculations
+    #[arg(long, default_value = "1000000")]
+    pub baseline_audience: f64,
+
+    /// Revenue per thousand impressions (RPM) for lift model calculations
+    #[arg(long, default_value = "15.0")]
+    pub rpm: f64,
+
+    /// --- NEW ---
+    /// Estimated number of token investors to model lift
+    #[arg(long, default_value = "1000")]
+    pub investor_count: u32,
+
+    /// --- NEW ---
+    /// Estimated new audience members generated per active investor per month
+    #[arg(long, default_value = "10")]
+    pub lift_per_investor: f64,
 }

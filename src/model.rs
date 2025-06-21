@@ -29,6 +29,7 @@ impl PayoutScenario {
     }
 
     /// Get days as integer
+    #[allow(dead_code)]
     pub fn days(&self) -> u32 {
         match self {
             Self::Day60 => 60,
@@ -201,10 +202,8 @@ pub struct ValuationResult {
 pub struct ReportData {
     /// Original inputs
     pub inputs: ValuationInputs,
-    /// Baseline valuation matrix (no lift)
-    pub baseline_valuations: Vec<ValuationResult>,
-    /// Valuation matrices for each lift scenario
-    pub lift_valuations: HashMap<LiftScenario, Vec<ValuationResult>>,
+    /// A unified list of all valuation results across all scenarios.
+    pub all_valuations: Vec<ValuationResult>,
     /// Discount rates for each volatility scenario
     pub discount_rates: HashMap<VolatilityScenario, DiscountRateComponents>,
     /// Summary statistics

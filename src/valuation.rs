@@ -71,19 +71,20 @@ pub fn calculate_full_valuation(inputs: &ValuationInputs) -> Result<ReportData, 
         discount_rates.insert(volatility, calculate_discount_rate(inputs, volatility));
     }
 
-    // Calculate baseline valuations (no lift)
-    let mut baseline_valuations = Vec::new();
+    let mut all_valuations = Vec::new();
+
+    // Calculate baseline valuations (no lift) and add to the unified vector
     for &payout in PayoutScenario::all() {
         for &volatility in VolatilityScenario::all() {
             let discount_rate = discount_rates[&volatility].total_rate();
             let present_value =
                 calculate_present_value(adjusted_baseline, discount_rate, payout.years())?;
 
-            baseline_valuations.push(ValuationResult {
+            all_valuations.push(ValuationResult {
                 present_value,
                 payout_scenario: payout,
                 volatility_scenario: volatility,
-                lift_scenario: None,
+                lift_scenario: None, // `None` for baseline
             });
         }
     }
@@ -98,7 +99,7 @@ pub fn calculate_full_valuation(inputs: &ValuationInputs) -> Result<ReportData, 
     };
 
     for &lift_scenario in LiftScenario::all() {
-        let mut scenario_results = Vec::new();
+        let scenario_results: Vec<ValuationResult> = Vec::new();
         let lift_amount = lift_scenario.quarterly_lift(
             lift_assumptions.investor_count,
             lift_assumptions.lift_per_investor,
@@ -112,11 +113,11 @@ pub fn calculate_full_valuation(inputs: &ValuationInputs) -> Result<ReportData, 
                 let present_value =
                     calculate_present_value(lifted_revenue, discount_rate, payout.years())?;
 
-                scenario_results.push(ValuationResult {
+                all_valuations.push(ValuationResult {
                     present_value,
                     payout_scenario: payout,
                     volatility_scenario: volatility,
-                    lift_scenario: Some(lift_scenario),
+                    lift_scenario: Some(lift_scenario), // Set the specific lift scenario
                 });
             }
         }
@@ -124,111 +125,84 @@ pub fn calculate_full_valuation(inputs: &ValuationInputs) -> Result<ReportData, 
         lift_valuations.insert(lift_scenario, scenario_results);
     }
 
-    // Calculate summary statistics
-    let summary =
-        calculate_summary_statistics(&baseline_valuations, &lift_valuations, adjusted_baseline)?;
+    // Calculate summary statistics from the unified vector
+    let summary = calculate_summary_statistics(&all_valuations, adjusted_baseline)?;
 
     Ok(ReportData {
         inputs: inputs.clone(),
-        baseline_valuations,
-        lift_valuations,
+        all_valuations, // Pass the single unified vector
         discount_rates,
         summary,
         lift_assumptions,
     })
 }
 
-/// Calculate summary statistics for the final summary
+/// Calculate summary statistics for the executive summary
 fn calculate_summary_statistics(
-    baseline_valuations: &[ValuationResult],
-    lift_valuations: &HashMap<LiftScenario, Vec<ValuationResult>>,
+    all_valuations: &[ValuationResult], // Takes the single unified vector
     adjusted_baseline: f64,
 ) -> Result<SummaryStatistics, ModelError> {
-    // Find min and max across all scenarios
-    let mut all_values = Vec::new();
-    all_values.extend(baseline_valuations.iter().map(|v| v.present_value));
-    for (_, results) in lift_valuations {
-        all_values.extend(results.iter().map(|v| v.present_value));
-    }
+    let all_values: Vec<f64> = all_valuations.iter().map(|v| v.present_value).collect();
 
     let min_valuation = all_values.iter().cloned().fold(f64::INFINITY, f64::min);
     let max_valuation = all_values.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
 
-    // Central estimate: typical volatility, 90 days, medium lift
-    let central_estimate = lift_valuations[&LiftScenario::Medium]
-        .iter()
-        .find(|v| {
-            v.payout_scenario == PayoutScenario::Day90
-                && v.volatility_scenario == VolatilityScenario::Typical
-        })
-        .ok_or_else(|| ModelError::CalculationError("Could not find central estimate".to_string()))?
-        .present_value;
+    // The find logic now uses the `.lift_scenario` field, fixing the dead code warning!
+    let find_value =
+        |payout: PayoutScenario, vol: VolatilityScenario, lift: Option<LiftScenario>| {
+            all_valuations
+                .iter()
+                .find(|v| {
+                    v.payout_scenario == payout
+                        && v.volatility_scenario == vol
+                        && v.lift_scenario == lift
+                })
+                .map(|v| v.present_value)
+                .ok_or_else(|| {
+                    ModelError::CalculationError(format!("Could not find value for scenario combo"))
+                })
+        };
 
-    // Volatility impact: compare low vs extreme at 90 days, medium lift
-    let low_vol_value = lift_valuations[&LiftScenario::Medium]
-        .iter()
-        .find(|v| {
-            v.payout_scenario == PayoutScenario::Day90
-                && v.volatility_scenario == VolatilityScenario::Low
-        })
-        .ok_or_else(|| {
-            ModelError::CalculationError("Could not find low volatility value".to_string())
-        })?
-        .present_value;
+    let central_estimate = find_value(
+        PayoutScenario::Day90,
+        VolatilityScenario::Typical,
+        Some(LiftScenario::Medium),
+    )?;
 
-    let extreme_vol_value = lift_valuations[&LiftScenario::Medium]
-        .iter()
-        .find(|v| {
-            v.payout_scenario == PayoutScenario::Day90
-                && v.volatility_scenario == VolatilityScenario::Extreme
-        })
-        .ok_or_else(|| {
-            ModelError::CalculationError("Could not find extreme volatility value".to_string())
-        })?
-        .present_value;
-
+    let low_vol_value = find_value(
+        PayoutScenario::Day90,
+        VolatilityScenario::Low,
+        Some(LiftScenario::Medium),
+    )?;
+    let extreme_vol_value = find_value(
+        PayoutScenario::Day90,
+        VolatilityScenario::Extreme,
+        Some(LiftScenario::Medium),
+    )?;
     let volatility_impact = ((low_vol_value - extreme_vol_value) / low_vol_value) * 100.0;
 
-    // Lift impact: compare low vs high at 90 days, typical volatility
-    let low_lift_value = lift_valuations[&LiftScenario::Low]
-        .iter()
-        .find(|v| {
-            v.payout_scenario == PayoutScenario::Day90
-                && v.volatility_scenario == VolatilityScenario::Typical
-        })
-        .ok_or_else(|| ModelError::CalculationError("Could not find low lift value".to_string()))?
-        .present_value;
-
-    let high_lift_value = lift_valuations[&LiftScenario::High]
-        .iter()
-        .find(|v| {
-            v.payout_scenario == PayoutScenario::Day90
-                && v.volatility_scenario == VolatilityScenario::Typical
-        })
-        .ok_or_else(|| ModelError::CalculationError("Could not find high lift value".to_string()))?
-        .present_value;
-
+    let low_lift_value = find_value(
+        PayoutScenario::Day90,
+        VolatilityScenario::Typical,
+        Some(LiftScenario::Low),
+    )?;
+    let high_lift_value = find_value(
+        PayoutScenario::Day90,
+        VolatilityScenario::Typical,
+        Some(LiftScenario::High),
+    )?;
     let lift_impact = ((high_lift_value - low_lift_value) / low_lift_value) * 100.0;
 
-    // Payout impact: compare 60 vs 120 days at typical volatility, medium lift
-    let day60_value = lift_valuations[&LiftScenario::Medium]
-        .iter()
-        .find(|v| {
-            v.payout_scenario == PayoutScenario::Day60
-                && v.volatility_scenario == VolatilityScenario::Typical
-        })
-        .ok_or_else(|| ModelError::CalculationError("Could not find 60-day value".to_string()))?
-        .present_value;
-
-    let day120_value = lift_valuations[&LiftScenario::Medium]
-        .iter()
-        .find(|v| {
-            v.payout_scenario == PayoutScenario::Day120
-                && v.volatility_scenario == VolatilityScenario::Typical
-        })
-        .ok_or_else(|| ModelError::CalculationError("Could not find 120-day value".to_string()))?
-        .present_value;
-
+    let day60_value = find_value(
+        PayoutScenario::Day60,
+        VolatilityScenario::Typical,
+        Some(LiftScenario::Medium),
+    )?;
+    let day120_value = find_value(
+        PayoutScenario::Day120,
+        VolatilityScenario::Typical,
+        Some(LiftScenario::Medium),
+    )?;
     let payout_impact = ((day60_value - day120_value) / day60_value) * 100.0;
 
     Ok(SummaryStatistics {
